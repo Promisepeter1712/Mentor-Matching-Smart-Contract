@@ -4,10 +4,13 @@
 (define-constant ERR-INVALID-PARAMS (err u400))
 (define-constant ERR-ALREADY-EXISTS (err u409))
 (define-constant ERR-INSUFFICIENT-BALANCE (err u402))
+(define-constant ERR-NOT-ELIGIBLE (err u403))
 
 (define-data-var contract-active bool true)
 (define-data-var session-fee uint u1000000)
 (define-data-var next-session-id uint u0)
+(define-data-var verification-threshold-rating uint u4)
+(define-data-var verification-threshold-sessions uint u10)
 
 (define-map student-profiles
     principal
@@ -32,6 +35,8 @@
         rating: uint,
         total-sessions: uint,
         active: bool,
+        verified: bool,
+        verification-date: uint,
         created-at: uint,
     }
 )
@@ -123,6 +128,26 @@
     (var-get next-session-id)
 )
 
+(define-read-only (get-verification-thresholds)
+    {
+        rating: (var-get verification-threshold-rating),
+        sessions: (var-get verification-threshold-sessions),
+    }
+)
+
+(define-read-only (is-mentor-eligible-for-verification (mentor principal))
+    (match (map-get? mentor-profiles mentor)
+        profile (and
+            (>= (get rating profile) (var-get verification-threshold-rating))
+            (>= (get total-sessions profile)
+                (var-get verification-threshold-sessions)
+            )
+            (not (get verified profile))
+        )
+        false
+    )
+)
+
 (define-public (create-student-profile
         (name (string-ascii 50))
         (skills-wanted (list 10 (string-ascii 30)))
@@ -169,6 +194,8 @@
             rating: u0,
             total-sessions: u0,
             active: true,
+            verified: false,
+            verification-date: u0,
             created-at: stacks-block-height,
         }))
     )
@@ -492,6 +519,61 @@
     (begin
         (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
         (try! (as-contract (stx-transfer? amount tx-sender CONTRACT-OWNER)))
+        (ok true)
+    )
+)
+
+(define-public (apply-for-verification)
+    (let ((mentor tx-sender))
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-some (map-get? mentor-profiles mentor)) ERR-NOT-FOUND)
+        (asserts! (is-mentor-eligible-for-verification mentor) ERR-NOT-ELIGIBLE)
+        (match (map-get? mentor-profiles mentor)
+            profile (begin
+                (map-set mentor-profiles mentor
+                    (merge profile {
+                        verified: true,
+                        verification-date: stacks-block-height,
+                    })
+                )
+                (ok true)
+            )
+            ERR-NOT-FOUND
+        )
+    )
+)
+
+(define-public (revoke-verification (mentor principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+        (asserts! (is-some (map-get? mentor-profiles mentor)) ERR-NOT-FOUND)
+        (match (map-get? mentor-profiles mentor)
+            profile (begin
+                (map-set mentor-profiles mentor
+                    (merge profile {
+                        verified: false,
+                        verification-date: u0,
+                    })
+                )
+                (ok true)
+            )
+            ERR-NOT-FOUND
+        )
+    )
+)
+
+(define-public (set-verification-thresholds
+        (rating-threshold uint)
+        (sessions-threshold uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+        (asserts! (and (>= rating-threshold u1) (<= rating-threshold u5))
+            ERR-INVALID-PARAMS
+        )
+        (asserts! (> sessions-threshold u0) ERR-INVALID-PARAMS)
+        (var-set verification-threshold-rating rating-threshold)
+        (var-set verification-threshold-sessions sessions-threshold)
         (ok true)
     )
 )
