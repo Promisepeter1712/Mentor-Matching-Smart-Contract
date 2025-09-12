@@ -11,6 +11,7 @@
 (define-data-var next-session-id uint u0)
 (define-data-var verification-threshold-rating uint u4)
 (define-data-var verification-threshold-sessions uint u10)
+(define-data-var next-program-id uint u0)
 
 (define-map student-profiles
     principal
@@ -86,6 +87,65 @@
     }
 )
 
+(define-map mentorship-programs
+    uint
+    {
+        mentor: principal,
+        title: (string-ascii 100),
+        description: (string-ascii 500),
+        skill: (string-ascii 30),
+        total-cost: uint,
+        duration-weeks: uint,
+        milestone-count: uint,
+        active: bool,
+        created-at: uint,
+    }
+)
+
+(define-map program-milestones
+    {
+        program-id: uint,
+        milestone-index: uint,
+    }
+    {
+        title: (string-ascii 100),
+        description: (string-ascii 300),
+        payment-percentage: uint,
+        estimated-weeks: uint,
+        requirements: (string-ascii 200),
+    }
+)
+
+(define-map program-enrollments
+    {
+        program-id: uint,
+        student: principal,
+    }
+    {
+        enrolled-at: uint,
+        current-milestone: uint,
+        total-paid: uint,
+        status: (string-ascii 20),
+        completed-milestones: (list 20 uint),
+    }
+)
+
+(define-map milestone-submissions
+    {
+        program-id: uint,
+        student: principal,
+        milestone-index: uint,
+    }
+    {
+        submission-text: (string-ascii 500),
+        submitted-at: uint,
+        reviewed: bool,
+        approved: bool,
+        mentor-feedback: (string-ascii 300),
+        reviewed-at: uint,
+    }
+)
+
 (define-read-only (get-student-profile (student principal))
     (map-get? student-profiles student)
 )
@@ -133,6 +193,46 @@
         rating: (var-get verification-threshold-rating),
         sessions: (var-get verification-threshold-sessions),
     }
+)
+
+(define-read-only (get-mentorship-program (program-id uint))
+    (map-get? mentorship-programs program-id)
+)
+
+(define-read-only (get-program-milestone
+        (program-id uint)
+        (milestone-index uint)
+    )
+    (map-get? program-milestones {
+        program-id: program-id,
+        milestone-index: milestone-index,
+    })
+)
+
+(define-read-only (get-program-enrollment
+        (program-id uint)
+        (student principal)
+    )
+    (map-get? program-enrollments {
+        program-id: program-id,
+        student: student,
+    })
+)
+
+(define-read-only (get-milestone-submission
+        (program-id uint)
+        (student principal)
+        (milestone-index uint)
+    )
+    (map-get? milestone-submissions {
+        program-id: program-id,
+        student: student,
+        milestone-index: milestone-index,
+    })
+)
+
+(define-read-only (get-next-program-id)
+    (var-get next-program-id)
 )
 
 (define-read-only (is-mentor-eligible-for-verification (mentor principal))
@@ -575,5 +675,261 @@
         (var-set verification-threshold-rating rating-threshold)
         (var-set verification-threshold-sessions sessions-threshold)
         (ok true)
+    )
+)
+
+(define-public (create-mentorship-program
+        (title (string-ascii 100))
+        (description (string-ascii 500))
+        (skill (string-ascii 30))
+        (total-cost uint)
+        (duration-weeks uint)
+        (milestone-count uint)
+    )
+    (let (
+            (mentor tx-sender)
+            (program-id (var-get next-program-id))
+        )
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-some (map-get? mentor-profiles mentor)) ERR-NOT-FOUND)
+        (asserts! (> (len title) u0) ERR-INVALID-PARAMS)
+        (asserts! (> total-cost u0) ERR-INVALID-PARAMS)
+        (asserts! (> duration-weeks u0) ERR-INVALID-PARAMS)
+        (asserts! (and (> milestone-count u0) (<= milestone-count u20))
+            ERR-INVALID-PARAMS
+        )
+        (begin
+            (map-set mentorship-programs program-id {
+                mentor: mentor,
+                title: title,
+                description: description,
+                skill: skill,
+                total-cost: total-cost,
+                duration-weeks: duration-weeks,
+                milestone-count: milestone-count,
+                active: true,
+                created-at: stacks-block-height,
+            })
+            (var-set next-program-id (+ program-id u1))
+            (ok program-id)
+        )
+    )
+)
+
+(define-public (set-program-milestone
+        (program-id uint)
+        (milestone-index uint)
+        (title (string-ascii 100))
+        (description (string-ascii 300))
+        (payment-percentage uint)
+        (estimated-weeks uint)
+        (requirements (string-ascii 200))
+    )
+    (let ((program (unwrap! (map-get? mentorship-programs program-id) ERR-NOT-FOUND)))
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-eq tx-sender (get mentor program)) ERR-UNAUTHORIZED)
+        (asserts! (< milestone-index (get milestone-count program))
+            ERR-INVALID-PARAMS
+        )
+        (asserts! (> (len title) u0) ERR-INVALID-PARAMS)
+        (asserts! (and (> payment-percentage u0) (<= payment-percentage u100))
+            ERR-INVALID-PARAMS
+        )
+        (asserts! (> estimated-weeks u0) ERR-INVALID-PARAMS)
+        (ok (map-set program-milestones {
+            program-id: program-id,
+            milestone-index: milestone-index,
+        } {
+            title: title,
+            description: description,
+            payment-percentage: payment-percentage,
+            estimated-weeks: estimated-weeks,
+            requirements: requirements,
+        }))
+    )
+)
+
+(define-public (enroll-in-program (program-id uint))
+    (let (
+            (student tx-sender)
+            (program (unwrap! (map-get? mentorship-programs program-id) ERR-NOT-FOUND))
+        )
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-some (map-get? student-profiles student)) ERR-NOT-FOUND)
+        (asserts! (get active program) ERR-UNAUTHORIZED)
+        (asserts!
+            (is-none (map-get? program-enrollments {
+                program-id: program-id,
+                student: student,
+            }))
+            ERR-ALREADY-EXISTS
+        )
+        (try! (stx-transfer? (get total-cost program) student (as-contract tx-sender)))
+        (ok (map-set program-enrollments {
+            program-id: program-id,
+            student: student,
+        } {
+            enrolled-at: stacks-block-height,
+            current-milestone: u0,
+            total-paid: u0,
+            status: "active",
+            completed-milestones: (list),
+        }))
+    )
+)
+
+(define-public (submit-milestone
+        (program-id uint)
+        (milestone-index uint)
+        (submission-text (string-ascii 500))
+    )
+    (let (
+            (student tx-sender)
+            (enrollment (unwrap!
+                (map-get? program-enrollments {
+                    program-id: program-id,
+                    student: student,
+                })
+                ERR-NOT-FOUND
+            ))
+        )
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-eq (get status enrollment) "active") ERR-UNAUTHORIZED)
+        (asserts! (is-eq milestone-index (get current-milestone enrollment))
+            ERR-INVALID-PARAMS
+        )
+        (asserts! (> (len submission-text) u0) ERR-INVALID-PARAMS)
+        (ok (map-set milestone-submissions {
+            program-id: program-id,
+            student: student,
+            milestone-index: milestone-index,
+        } {
+            submission-text: submission-text,
+            submitted-at: stacks-block-height,
+            reviewed: false,
+            approved: false,
+            mentor-feedback: "",
+            reviewed-at: u0,
+        }))
+    )
+)
+
+(define-public (review-milestone
+        (program-id uint)
+        (student principal)
+        (milestone-index uint)
+        (approved bool)
+        (feedback (string-ascii 300))
+    )
+    (let (
+            (program (unwrap! (map-get? mentorship-programs program-id) ERR-NOT-FOUND))
+            (submission (unwrap!
+                (map-get? milestone-submissions {
+                    program-id: program-id,
+                    student: student,
+                    milestone-index: milestone-index,
+                })
+                ERR-NOT-FOUND
+            ))
+            (enrollment (unwrap!
+                (map-get? program-enrollments {
+                    program-id: program-id,
+                    student: student,
+                })
+                ERR-NOT-FOUND
+            ))
+            (milestone (unwrap!
+                (map-get? program-milestones {
+                    program-id: program-id,
+                    milestone-index: milestone-index,
+                })
+                ERR-NOT-FOUND
+            ))
+        )
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-eq tx-sender (get mentor program)) ERR-UNAUTHORIZED)
+        (asserts! (not (get reviewed submission)) ERR-ALREADY-EXISTS)
+        (begin
+            (map-set milestone-submissions {
+                program-id: program-id,
+                student: student,
+                milestone-index: milestone-index,
+            }
+                (merge submission {
+                    reviewed: true,
+                    approved: approved,
+                    mentor-feedback: feedback,
+                    reviewed-at: stacks-block-height,
+                })
+            )
+            (if approved
+                (complete-milestone program-id student milestone-index milestone
+                    enrollment
+                )
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-private (complete-milestone
+        (program-id uint)
+        (student principal)
+        (milestone-index uint)
+        (milestone {
+            title: (string-ascii 100),
+            description: (string-ascii 300),
+            payment-percentage: uint,
+            estimated-weeks: uint,
+            requirements: (string-ascii 200),
+        })
+        (enrollment {
+            enrolled-at: uint,
+            current-milestone: uint,
+            total-paid: uint,
+            status: (string-ascii 20),
+            completed-milestones: (list 20 uint),
+        })
+    )
+    (let (
+            (program (unwrap-panic (map-get? mentorship-programs program-id)))
+            (payment-amount (/ (* (get total-cost program) (get payment-percentage milestone))
+                u100
+            ))
+            (new-total-paid (+ (get total-paid enrollment) payment-amount))
+            (updated-completed-milestones (unwrap-panic (as-max-len?
+                (append (get completed-milestones enrollment) milestone-index)
+                u20
+            )))
+            (is-program-complete (is-eq (+ milestone-index u1) (get milestone-count program)))
+        )
+        (try! (as-contract (stx-transfer? payment-amount tx-sender (get mentor program))))
+        (map-set program-enrollments {
+            program-id: program-id,
+            student: student,
+        } {
+            enrolled-at: (get enrolled-at enrollment),
+            current-milestone: (if is-program-complete
+                milestone-index
+                (+ milestone-index u1)
+            ),
+            total-paid: new-total-paid,
+            status: (if is-program-complete
+                "completed"
+                "active"
+            ),
+            completed-milestones: updated-completed-milestones,
+        })
+        (ok true)
+    )
+)
+
+(define-public (toggle-program-status (program-id uint))
+    (let ((program (unwrap! (map-get? mentorship-programs program-id) ERR-NOT-FOUND)))
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-eq tx-sender (get mentor program)) ERR-UNAUTHORIZED)
+        (ok (map-set mentorship-programs program-id
+            (merge program { active: (not (get active program)) })
+        ))
     )
 )
