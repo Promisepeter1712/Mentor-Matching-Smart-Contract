@@ -5,12 +5,21 @@
 (define-constant ERR-ALREADY-EXISTS (err u409))
 (define-constant ERR-INSUFFICIENT-BALANCE (err u402))
 (define-constant ERR-NOT-ELIGIBLE (err u403))
+(define-constant ERR-MESSAGE-NOT-FOUND (err u19))
+(define-constant ERR-THREAD-NOT-FOUND (err u20))
+(define-constant ERR-UNAUTHORIZED-MESSAGE-ACCESS (err u21))
+(define-constant ERR-INVALID-MESSAGE-CONTENT (err u22))
+(define-constant ERR-MESSAGE-TOO-LONG (err u23))
 
 (define-data-var contract-active bool true)
 (define-data-var session-fee uint u1000000)
 (define-data-var next-session-id uint u0)
 (define-data-var verification-threshold-rating uint u4)
 (define-data-var verification-threshold-sessions uint u10)
+
+;; Messaging System Data Variables
+(define-data-var thread-id-nonce uint u0)
+(define-data-var message-id-nonce uint u0)
 
 (define-map student-profiles
     principal
@@ -86,6 +95,34 @@
     }
 )
 
+;; Messaging System Data Maps
+(define-map message-threads
+    { thread-id: uint }
+    {
+        participant-1: principal,
+        participant-2: principal,
+        created-at: uint,
+        last-message-at: uint,
+        message-count: uint,
+    }
+)
+
+(define-map messages
+    { message-id: uint }
+    {
+        thread-id: uint,
+        sender: principal,
+        content: (string-utf8 500),
+        sent-at: uint,
+        is-read: bool,
+    }
+)
+
+(define-map user-thread-mapping
+    { user-1: principal, user-2: principal }
+    { thread-id: uint }
+)
+
 (define-read-only (get-student-profile (student principal))
     (map-get? student-profiles student)
 )
@@ -146,6 +183,45 @@
         )
         false
     )
+)
+
+;; Messaging System Read-Only Functions
+(define-read-only (get-thread-details (thread-id uint))
+    (map-get? message-threads { thread-id: thread-id })
+)
+
+(define-read-only (get-message-details (message-id uint))
+    (map-get? messages { message-id: message-id })
+)
+
+(define-read-only (get-user-thread
+        (user-1 principal)
+        (user-2 principal)
+    )
+    (let (
+            (mapping-1 (map-get? user-thread-mapping { user-1: user-1, user-2: user-2 }))
+            (mapping-2 (map-get? user-thread-mapping { user-1: user-2, user-2: user-1 }))
+        )
+        (if (is-some mapping-1)
+            mapping-1
+            mapping-2
+        )
+    )
+)
+
+(define-read-only (get-thread-messages-count (thread-id uint))
+    (match (map-get? message-threads { thread-id: thread-id })
+        thread (ok (get message-count thread))
+        ERR-THREAD-NOT-FOUND
+    )
+)
+
+(define-read-only (get-next-thread-id)
+    (var-get thread-id-nonce)
+)
+
+(define-read-only (get-next-message-id)
+    (var-get message-id-nonce)
 )
 
 (define-public (create-student-profile
@@ -575,5 +651,147 @@
         (var-set verification-threshold-rating rating-threshold)
         (var-set verification-threshold-sessions sessions-threshold)
         (ok true)
+    )
+)
+
+;; Messaging System Functions
+
+(define-private (is-registered-user (user principal))
+    (or
+        (is-some (map-get? student-profiles user))
+        (is-some (map-get? mentor-profiles user))
+    )
+)
+
+(define-private (is-thread-participant (thread-id uint) (user principal))
+    (match (map-get? message-threads { thread-id: thread-id })
+        thread (or
+            (is-eq user (get participant-1 thread))
+            (is-eq user (get participant-2 thread))
+        )
+        false
+    )
+)
+
+(define-private (get-or-create-thread
+        (sender principal)
+        (recipient principal)
+    )
+    (let (
+            (existing-thread (get-user-thread sender recipient))
+            (thread-id (var-get thread-id-nonce))
+        )
+        (if (is-some existing-thread)
+            (unwrap-panic existing-thread)
+            (begin
+                (map-set message-threads { thread-id: thread-id } {
+                    participant-1: sender,
+                    participant-2: recipient,
+                    created-at: stacks-block-height,
+                    last-message-at: stacks-block-height,
+                    message-count: u0,
+                })
+                (map-set user-thread-mapping 
+                    { user-1: sender, user-2: recipient } 
+                    { thread-id: thread-id }
+                )
+                (var-set thread-id-nonce (+ thread-id u1))
+                { thread-id: thread-id }
+            )
+        )
+    )
+)
+
+(define-public (send-message
+        (recipient principal)
+        (content (string-utf8 500))
+    )
+    (let (
+            (sender tx-sender)
+            (message-id (var-get message-id-nonce))
+        )
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-registered-user sender) ERR-UNAUTHORIZED)
+        (asserts! (is-registered-user recipient) ERR-NOT-FOUND)
+        (asserts! (not (is-eq sender recipient)) ERR-INVALID-PARAMS)
+        (asserts! (> (len content) u0) ERR-INVALID-MESSAGE-CONTENT)
+        (asserts! (<= (len content) u500) ERR-MESSAGE-TOO-LONG)
+        
+        (let ((thread-info (get-or-create-thread sender recipient)))
+            (let ((thread-id (get thread-id thread-info)))
+                (map-set messages { message-id: message-id } {
+                    thread-id: thread-id,
+                    sender: sender,
+                    content: content,
+                    sent-at: stacks-block-height,
+                    is-read: false,
+                })
+                
+                (match (map-get? message-threads { thread-id: thread-id })
+                    thread (map-set message-threads { thread-id: thread-id }
+                        (merge thread {
+                            last-message-at: stacks-block-height,
+                            message-count: (+ (get message-count thread) u1),
+                        })
+                    )
+                    false
+                )
+                
+                (var-set message-id-nonce (+ message-id u1))
+                (ok message-id)
+            )
+        )
+    )
+)
+
+(define-public (mark-message-as-read (message-id uint))
+    (let ((message (unwrap! (map-get? messages { message-id: message-id }) ERR-MESSAGE-NOT-FOUND)))
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (is-thread-participant (get thread-id message) tx-sender)
+            ERR-UNAUTHORIZED-MESSAGE-ACCESS
+        )
+        (ok (map-set messages { message-id: message-id }
+            (merge message { is-read: true })
+        ))
+    )
+)
+
+(define-read-only (get-thread-messages
+        (thread-id uint)
+        (limit uint)
+        (offset uint)
+    )
+    (begin
+        (asserts! (is-thread-participant thread-id tx-sender) ERR-UNAUTHORIZED-MESSAGE-ACCESS)
+        (ok {
+            thread-id: thread-id,
+            limit: limit,
+            offset: offset,
+            note: "Messages available through individual message queries"
+        })
+    )
+)
+
+(define-read-only (get-user-threads (user principal))
+    (begin
+        (asserts! (is-eq tx-sender user) ERR-UNAUTHORIZED)
+        (ok {
+            user: user,
+            note: "Thread list available through individual thread queries"
+        })
+    )
+)
+
+(define-read-only (count-unread-messages-in-thread
+        (thread-id uint)
+        (user principal)
+    )
+    (begin
+        (asserts! (is-thread-participant thread-id user) ERR-UNAUTHORIZED-MESSAGE-ACCESS)
+        (ok {
+            thread-id: thread-id,
+            user: user,
+            note: "Unread count available through message iteration"
+        })
     )
 )
