@@ -5,6 +5,7 @@
 (define-constant ERR-ALREADY-EXISTS (err u409))
 (define-constant ERR-INSUFFICIENT-BALANCE (err u402))
 (define-constant ERR-NOT-ELIGIBLE (err u403))
+(define-constant ERR-INSUFFICIENT-WITHDRAWABLE (err u406))
 (define-constant ERR-MESSAGE-NOT-FOUND (err u19))
 (define-constant ERR-THREAD-NOT-FOUND (err u20))
 (define-constant ERR-UNAUTHORIZED-MESSAGE-ACCESS (err u21))
@@ -12,7 +13,9 @@
 (define-constant ERR-MESSAGE-TOO-LONG (err u23))
 
 (define-data-var contract-active bool true)
-(define-data-var session-fee uint u1000000)
+(define-data-var session-fee uint u0)
+(define-data-var escrow-locked uint u0)
+(define-data-var platform-fees-accrued uint u0)
 (define-data-var next-session-id uint u0)
 (define-data-var verification-threshold-rating uint u4)
 (define-data-var verification-threshold-sessions uint u10)
@@ -159,6 +162,24 @@
 
 (define-read-only (get-session-fee)
     (var-get session-fee)
+)
+
+(define-read-only (get-escrow-locked)
+    (var-get escrow-locked)
+)
+
+(define-read-only (get-platform-fees-accrued)
+    (var-get platform-fees-accrued)
+)
+
+(define-read-only (get-withdrawable-balance)
+    (let (
+            (contract-principal (as-contract tx-sender))
+            (balance (stx-get-balance contract-principal))
+            (locked (var-get escrow-locked))
+        )
+        (if (>= balance locked) (- balance locked) u0)
+    )
 )
 
 (define-read-only (get-next-session-id)
@@ -387,6 +408,10 @@
     )
 )
 
+(define-private (min-uint (a uint) (b uint))
+    (if (<= a b) a b)
+)
+
 (define-public (create-session
         (mentor principal)
         (skill (string-ascii 30))
@@ -402,10 +427,10 @@
         )
         (asserts! (is-contract-active) ERR-UNAUTHORIZED)
         (asserts! (get active mentor-profile) ERR-UNAUTHORIZED)
+        (asserts! (> duration u0) ERR-INVALID-PARAMS)
         (asserts! (>= (get hourly-budget student-profile) session-cost)
             ERR-INSUFFICIENT-BALANCE
         )
-        (asserts! (> duration u0) ERR-INVALID-PARAMS)
         (try! (stx-transfer? session-cost student (as-contract tx-sender)))
         (map-set sessions session-id {
             student: student,
@@ -418,19 +443,32 @@
             created-at: stacks-block-height,
         })
         (var-set next-session-id (+ session-id u1))
+        (var-set escrow-locked (+ (var-get escrow-locked) session-cost))
         (ok session-id)
     )
 )
 
 (define-public (complete-session (session-id uint))
-    (let ((session (unwrap! (map-get? sessions session-id) ERR-NOT-FOUND)))
+    (let (
+            (session (unwrap! (map-get? sessions session-id) ERR-NOT-FOUND))
+            (fee (get fee session))
+            (platform-fee (min-uint (var-get session-fee) fee))
+            (payout (- fee platform-fee))
+            (locked (var-get escrow-locked))
+        )
         (asserts! (is-contract-active) ERR-UNAUTHORIZED)
         (asserts!
             (or (is-eq tx-sender (get student session)) (is-eq tx-sender (get mentor session)))
             ERR-UNAUTHORIZED
         )
         (asserts! (is-eq (get status session) "scheduled") ERR-INVALID-PARAMS)
-        (try! (as-contract (stx-transfer? (get fee session) tx-sender (get mentor session))))
+        (asserts! (>= locked fee) ERR-INVALID-PARAMS)
+        (if (> payout u0)
+            (try! (as-contract (stx-transfer? payout tx-sender (get mentor session))))
+            true
+        )
+        (var-set escrow-locked (- locked fee))
+        (var-set platform-fees-accrued (+ (var-get platform-fees-accrued) platform-fee))
         (begin
             (map-set sessions session-id (merge session { status: "completed" }))
             (unwrap-panic (update-session-counts (get student session) (get mentor session)))
@@ -440,14 +478,20 @@
 )
 
 (define-public (cancel-session (session-id uint))
-    (let ((session (unwrap! (map-get? sessions session-id) ERR-NOT-FOUND)))
+    (let (
+            (session (unwrap! (map-get? sessions session-id) ERR-NOT-FOUND))
+            (fee (get fee session))
+            (locked (var-get escrow-locked))
+        )
         (asserts! (is-contract-active) ERR-UNAUTHORIZED)
         (asserts!
             (or (is-eq tx-sender (get student session)) (is-eq tx-sender (get mentor session)))
             ERR-UNAUTHORIZED
         )
         (asserts! (is-eq (get status session) "scheduled") ERR-INVALID-PARAMS)
-        (try! (as-contract (stx-transfer? (get fee session) tx-sender (get student session))))
+        (asserts! (>= locked fee) ERR-INVALID-PARAMS)
+        (try! (as-contract (stx-transfer? fee tx-sender (get student session))))
+        (var-set escrow-locked (- locked fee))
         (map-set sessions session-id (merge session { status: "cancelled" }))
         (ok true)
     )
@@ -592,9 +636,13 @@
 )
 
 (define-public (withdraw-fees (amount uint))
-    (begin
-        (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
-        (try! (as-contract (stx-transfer? amount tx-sender CONTRACT-OWNER)))
+    (let (
+            (caller tx-sender)
+            (withdrawable (get-withdrawable-balance))
+        )
+        (asserts! (is-eq caller CONTRACT-OWNER) ERR-UNAUTHORIZED)
+        (asserts! (<= amount withdrawable) ERR-INSUFFICIENT-WITHDRAWABLE)
+        (try! (as-contract (stx-transfer? amount tx-sender caller)))
         (ok true)
     )
 )
@@ -704,7 +752,7 @@
 
 (define-public (send-message
         (recipient principal)
-        (content (string-utf8 500))
+        (content (string-utf8 1000))
     )
     (let (
             (sender tx-sender)
@@ -722,7 +770,7 @@
                 (map-set messages { message-id: message-id } {
                     thread-id: thread-id,
                     sender: sender,
-                    content: content,
+                    content: (unwrap-panic (as-max-len? content u500)),
                     sent-at: stacks-block-height,
                     is-read: false,
                 })

@@ -60,7 +60,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(result).toBeOk();
+    expect(result).toBeOk(expect.anything());
   });
 
   it("should allow mentors to send messages to students", () => {
@@ -79,7 +79,7 @@ describe("Messaging System", () => {
       mentor1
     );
 
-    expect(result).toBeOk();
+    expect(result).toBeOk(expect.anything());
   });
 
   it("should reject messages from unregistered users", () => {
@@ -97,7 +97,7 @@ describe("Messaging System", () => {
       unregistered
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should reject messages to unregistered users", () => {
@@ -115,7 +115,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should reject empty messages", () => {
@@ -134,7 +134,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should reject messages that are too long", () => {
@@ -155,7 +155,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should prevent users from messaging themselves", () => {
@@ -173,7 +173,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should allow marking messages as read by participants", () => {
@@ -192,11 +192,11 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(sendResult.result).toBeOk();
+    expect(sendResult.result).toBeOk(expect.anything());
     
     // Extract message ID
     const messageIdClarityValue = sendResult.result;
-    const messageId = Number((messageIdClarityValue as any).value);
+    const messageId = (messageIdClarityValue as any).value.value as bigint;
 
     // Mark as read by mentor
     const { result } = simnet.callPublicFn(
@@ -206,7 +206,7 @@ describe("Messaging System", () => {
       mentor1
     );
 
-    expect(result).toBeOk();
+    expect(result).toBeOk(expect.anything());
   });
 
   it("should prevent non-participants from marking messages as read", () => {
@@ -226,9 +226,9 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(sendResult.result).toBeOk();
+    expect(sendResult.result).toBeOk(expect.anything());
     
-    const messageId = Number((sendResult.result as any).value);
+    const messageId = (sendResult.result as any).value.value as bigint;
 
     // student2 should not be able to mark the message as read
     const { result } = simnet.callPublicFn(
@@ -238,7 +238,7 @@ describe("Messaging System", () => {
       student2
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should provide message details to anyone", () => {
@@ -257,9 +257,9 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(sendResult.result).toBeOk();
+    expect(sendResult.result).toBeOk(expect.anything());
     
-    const messageId = Number((sendResult.result as any).value);
+    const messageId = (sendResult.result as any).value.value as bigint;
 
     // Check message details
     const { result } = simnet.callReadOnlyFn(
@@ -269,7 +269,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(result).toBeSome();
+    expect(result).toBeSome(expect.anything());
   });
 
   it("should handle non-existent message requests gracefully", () => {
@@ -315,7 +315,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(sendResult.result).toBeOk();
+    expect(sendResult.result).toBeOk(expect.anything());
 
     const threadId = 0; // First thread
 
@@ -327,7 +327,7 @@ describe("Messaging System", () => {
       student2
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should prevent users from accessing other users' thread lists", () => {
@@ -343,7 +343,7 @@ describe("Messaging System", () => {
       student2
     );
 
-    expect(result).toBeErr();
+    expect(result).toBeErr(expect.anything());
   });
 
   it("should respect contract active state", () => {
@@ -359,7 +359,7 @@ describe("Messaging System", () => {
       deployer
     );
 
-    expect(deactivateResult.result).toBeOk();
+    expect(deactivateResult.result).toBeOk(expect.anything());
 
     // Try to send message while contract is inactive
     const sendResult = simnet.callPublicFn(
@@ -372,7 +372,7 @@ describe("Messaging System", () => {
       student1
     );
 
-    expect(sendResult.result).toBeErr();
+    expect(sendResult.result).toBeErr(expect.anything());
 
     // Reactivate contract
     const reactivateResult = simnet.callPublicFn(
@@ -382,6 +382,6 @@ describe("Messaging System", () => {
       deployer
     );
 
-    expect(reactivateResult.result).toBeOk();
+    expect(reactivateResult.result).toBeOk(expect.anything());
   });
 });
